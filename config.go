@@ -13,7 +13,7 @@ type Config struct {
 
 type View struct {
 	Title string     `yaml:"title"`
-	Form  []FormStep `yaml:"form"`
+	Form  []FormStep `yaml:"steps"`
 	Run   string     `yaml:"run"`
 	Union []string   `yaml:"union"`
 	Menu  []string   `yaml:"menu"`
@@ -42,6 +42,30 @@ func (v *View) isFormView() bool {
 	return v.Run != ""
 }
 
+func (v *View) isUnionView() bool {
+	return len(v.Union) > 0
+}
+
+func (v *View) isMenuView() bool {
+	return len(v.Menu) > 0
+}
+
+func (c *Config) validateUnionRef(viewName, ref string) error {
+	target, ok := c.Views[ref]
+	if !ok {
+		return fmt.Errorf("view %q: union references unknown view %q", viewName, ref)
+	}
+	if target.isUnionView() {
+		for _, innerRef := range target.Union {
+			if err := c.validateUnionRef(viewName, innerRef); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
 func (c *Config) validate() error {
 	for name, v := range c.Views {
 		if err := v.validate(name); err != nil {
@@ -50,15 +74,8 @@ func (c *Config) validate() error {
 	}
 	for name, v := range c.Views {
 		for _, ref := range v.Union {
-			target, ok := c.Views[ref]
-			if !ok {
-				return fmt.Errorf("view %q: union references unknown view %q", name, ref)
-			}
-			if !target.isFormView() {
-				return fmt.Errorf("view %q: union references non-FormView %q", name, ref)
-			}
-			if len(target.Form) != 1 {
-				return fmt.Errorf("view %q: union references FormView %q with %d steps (must be 1)", name, ref, len(target.Form))
+			if err := c.validateUnionRef(name, ref); err != nil {
+				return err
 			}
 		}
 		for _, ref := range v.Menu {

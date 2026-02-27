@@ -9,7 +9,7 @@ func TestParseConfig_MinimalFormView(t *testing.T) {
 	input := `
 views:
   main:
-    form:
+    steps:
       - name: file
         list: find . -type f
     run: vim $file
@@ -43,7 +43,7 @@ func TestParseConfig_FormStepWithDisplayAndPreview(t *testing.T) {
 	input := `
 views:
   main:
-    form:
+    steps:
       - name: file
         list: find . -type f
         display: basename {}
@@ -67,7 +67,7 @@ func TestParseConfig_InputStep(t *testing.T) {
 	input := `
 views:
   main:
-    form:
+    steps:
       - name: query
         placeholder: Enter search term
     run: grep -r $query .
@@ -111,7 +111,7 @@ func TestParseConfig_FormStepMustHaveListOrPlaceholder(t *testing.T) {
 	input := `
 views:
   main:
-    form:
+    steps:
       - name: x
     run: echo $x
 `
@@ -125,7 +125,7 @@ func TestParseConfig_FormStepCannotHaveBothListAndPlaceholder(t *testing.T) {
 	input := `
 views:
   main:
-    form:
+    steps:
       - name: x
         list: echo hello
         placeholder: Type something
@@ -141,7 +141,7 @@ func TestParseConfig_FormStepMustHaveName(t *testing.T) {
 	input := `
 views:
   main:
-    form:
+    steps:
       - list: echo hello
     run: echo done
 `
@@ -164,7 +164,7 @@ func TestParseConfig_TransformCommandValid(t *testing.T) {
 			input := fmt.Sprintf(`
 views:
   main:
-    form:
+    steps:
       - name: file
         list: find . -type f
         display: "%s"
@@ -182,7 +182,7 @@ func TestParseConfig_TransformCommandInvalid(t *testing.T) {
 	input := `
 views:
   main:
-    form:
+    steps:
       - name: file
         list: find . -type f
         display: basename
@@ -200,12 +200,12 @@ views:
   main:
     union: [files, branches]
   files:
-    form:
+    steps:
       - name: file
         list: find . -type f
     run: vim $file
   branches:
-    form:
+    steps:
       - name: branch
         list: git branch --format=%(refname:short)
     run: git switch $branch
@@ -235,29 +235,66 @@ views:
 	}
 }
 
-func TestParseConfig_UnionRefMustBeFormView(t *testing.T) {
+func TestParseConfig_UnionRefCanBeMenuView(t *testing.T) {
 	input := `
 views:
   main:
-    union: [sub]
-  sub:
-    menu: [leaf]
-  leaf:
-    run: echo hi
+    union: [commands]
+  commands:
+    menu: [lazygit, nvim]
+  lazygit:
+    run: lazygit
+  nvim:
+    run: nvim
 `
 	_, err := ParseConfig([]byte(input))
-	if err == nil {
-		t.Fatal("expected error for union referencing non-FormView")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestParseConfig_UnionRefMustHaveExactlyOneStep(t *testing.T) {
+func TestParseConfig_UnionRefCanBeUnionView(t *testing.T) {
 	input := `
 views:
   main:
-    union: [multi]
-  multi:
-    form:
+    union: [sessions, files]
+  sessions:
+    union: [tmux, zellij]
+  tmux:
+    steps:
+      - name: s
+        list: echo tmux-session
+    run: tmux attach -t $s
+  zellij:
+    steps:
+      - name: s
+        list: echo zellij-session
+    run: zellij attach $s
+  files:
+    steps:
+      - name: file
+        list: find . -type f
+    run: vim $file
+`
+	_, err := ParseConfig([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseConfig_UnionRefCanBeMultiStepFormView(t *testing.T) {
+	input := `
+views:
+  main:
+    union: [files, wizard]
+  files:
+    steps:
+      - name: file
+        list: echo file
+    run: echo $file
+  wizard:
+    title: Wizard
+    steps:
       - name: a
         list: echo a
       - name: b
@@ -265,8 +302,8 @@ views:
     run: echo $a $b
 `
 	_, err := ParseConfig([]byte(input))
-	if err == nil {
-		t.Fatal("expected error for union referencing FormView with 2 steps")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -289,7 +326,7 @@ views:
     menu: [files, lazygit]
   files:
     title: Files
-    form:
+    steps:
       - name: file
         list: find . -type f
     run: vim $file

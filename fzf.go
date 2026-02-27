@@ -26,7 +26,7 @@ type FzfResult struct {
 }
 
 func fzfSelect(items []string, opts FzfOptions) (*FzfResult, error) {
-	args := []string{"--ansi", "--read0"}
+	args := []string{"--ansi"}
 
 	if opts.Preview != "" {
 		args = append(args, "--preview", opts.Preview)
@@ -51,8 +51,9 @@ func fzfSelect(items []string, opts FzfOptions) (*FzfResult, error) {
 	}
 
 	cmd := exec.Command("fzf", args...)
-	cmd.Stdin = strings.NewReader(strings.Join(items, "\x00"))
+	cmd.Stdin = strings.NewReader(strings.Join(items, "\n"))
 	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), "CLICOLOR_FORCE=1")
 
 	out, err := cmd.Output()
 	if err != nil {

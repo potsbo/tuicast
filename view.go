@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 func shellOutput(cmd string, env []string) (string, error) {
@@ -30,12 +31,12 @@ func shellLines(cmd string, env []string) ([]string, error) {
 }
 
 func shellExec(cmd string, env []string) error {
-	c := exec.Command("sh", "-c", cmd)
-	c.Env = append(os.Environ(), env...)
-	c.Stdin = os.Stdin
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	return c.Run()
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		return err
+	}
+	environ := append(os.Environ(), env...)
+	return syscall.Exec(shPath, []string{"sh", "-c", cmd}, environ)
 }
 
 func historyPath() string {
@@ -121,39 +122,99 @@ func executeSelectStep(step *FormStep, env []string) (string, error) {
 	return result.Line, nil
 }
 
-func executeUnionView(cfg *Config, name string, v *View) error {
-	var allItems []string
-	type itemMeta struct {
-		viewName string
-		rawLine  string
-	}
-	var metas []itemMeta
+type unionItem struct {
+	fzfLine  string // view_name\traw\tdisplay for fzf
+	viewName string
+	rawLine  string
+	isLeaf   bool // true = executeView directly (menu item), false = FormView with env
+}
 
-	for _, ref := range v.Union {
-		refView := cfg.Views[ref]
-		step := refView.Form[0]
-
-		lines, err := shellLines(step.List, nil)
-		if err != nil {
-			return fmt.Errorf("view %q: list command failed: %w", ref, err)
-		}
-
-		displayLines := lines
-		if step.Display != "" {
-			displayLines, err = transform(step.Display, lines, nil)
+func collectUnionItems(cfg *Config, refs []string) ([]unionItem, error) {
+	var items []unionItem
+	for _, ref := range refs {
+		target := cfg.Views[ref]
+		switch {
+		case target.isUnionView():
+			inner, err := collectUnionItems(cfg, target.Union)
 			if err != nil {
-				return fmt.Errorf("view %q: display transform failed: %w", ref, err)
+				return nil, err
+			}
+			items = append(items, inner...)
+		case target.isMenuView():
+			for _, menuRef := range target.Menu {
+				menuView := cfg.Views[menuRef]
+				title := menuView.Title
+				if title == "" {
+					title = menuRef
+				}
+				items = append(items, unionItem{
+					fzfLine:  menuRef + "\t" + menuRef + "\t" + title,
+					viewName: menuRef,
+					isLeaf:   true,
+				})
+			}
+		case target.isFormView() && len(target.Form) != 1:
+			title := target.Title
+			if title == "" {
+				title = ref
+			}
+			items = append(items, unionItem{
+				fzfLine:  ref + "\t" + ref + "\t" + title,
+				viewName: ref,
+				isLeaf:   true,
+			})
+		default:
+			step := target.Form[0]
+			lines, err := shellLines(step.List, nil)
+			if err != nil {
+				return nil, fmt.Errorf("view %q: list command failed: %w", ref, err)
+			}
+			displayLines := lines
+			if step.Display != "" {
+				displayLines, err = transform(step.Display, lines, nil)
+				if err != nil {
+					return nil, fmt.Errorf("view %q: display transform failed: %w", ref, err)
+				}
+			}
+			for i, line := range lines {
+				items = append(items, unionItem{
+					fzfLine:  ref + "\t" + line + "\t" + displayLines[i],
+					viewName: ref,
+					rawLine:  line,
+				})
 			}
 		}
+	}
+	return items, nil
+}
 
-		for i, line := range lines {
-			display := displayLines[i]
-			allItems = append(allItems, ref+"\t"+line+"\t"+display)
-			metas = append(metas, itemMeta{viewName: ref, rawLine: line})
+func collectUnionFormRefs(cfg *Config, refs []string) []string {
+	var result []string
+	for _, ref := range refs {
+		target := cfg.Views[ref]
+		switch {
+		case target.isUnionView():
+			result = append(result, collectUnionFormRefs(cfg, target.Union)...)
+		case target.isFormView() && len(target.Form) == 1:
+			result = append(result, ref)
 		}
 	}
+	return result
+}
 
-	previewScript := generatePreviewDispatcher(cfg, v.Union)
+func executeUnionView(cfg *Config, name string, v *View) error {
+	items, err := collectUnionItems(cfg, v.Union)
+	if err != nil {
+		return err
+	}
+
+	fzfLines := make([]string, len(items))
+	for i, item := range items {
+		fzfLines[i] = item.fzfLine
+	}
+
+	formRefs := collectUnionFormRefs(cfg, v.Union)
+	previewScript := generatePreviewDispatcher(cfg, formRefs)
 
 	opts := FzfOptions{
 		Delimiter: "\t",
@@ -163,19 +224,23 @@ func executeUnionView(cfg *Config, name string, v *View) error {
 		opts.Preview = previewScript
 	}
 
-	result, err := fzfSelect(allItems, opts)
+	result, err := fzfSelect(fzfLines, opts)
 	if err != nil {
 		return err
 	}
 
-	if result.Index < 0 || result.Index >= len(metas) {
+	if result.Index < 0 || result.Index >= len(items) {
 		return fmt.Errorf("invalid selection")
 	}
-	meta := metas[result.Index]
+	selected := items[result.Index]
 
-	refView := cfg.Views[meta.viewName]
+	if selected.isLeaf {
+		return executeView(cfg, selected.viewName)
+	}
+
+	refView := cfg.Views[selected.viewName]
 	stepName := refView.Form[0].Name
-	env := []string{stepName + "=" + meta.rawLine}
+	env := []string{stepName + "=" + selected.rawLine}
 
 	expanded, err := shellOutput("echo "+refView.Run, env)
 	if err != nil {
@@ -211,8 +276,6 @@ func generatePreviewDispatcher(cfg *Config, refs []string) string {
 }
 
 func executeMenuView(cfg *Config, name string, v *View) error {
-	selfBin, _ := os.Executable()
-
 	var items []string
 	for _, ref := range v.Menu {
 		refView := cfg.Views[ref]
@@ -226,14 +289,19 @@ func executeMenuView(cfg *Config, name string, v *View) error {
 	opts := FzfOptions{
 		Delimiter: "\t",
 		WithNth:   "2",
-		Bind: []string{
-			fmt.Sprintf("enter:execute(%s --view {1})+abort", selfBin),
-		},
 	}
 
-	_, err := fzfSelect(items, opts)
-	if err == ErrCancelled {
-		return nil
+	for {
+		result, err := fzfSelect(items, opts)
+		if err != nil {
+			return err
+		}
+
+		selected := strings.SplitN(items[result.Index], "\t", 2)[0]
+		err = executeView(cfg, selected)
+		if err == ErrCancelled {
+			continue
+		}
+		return err
 	}
-	return err
 }
