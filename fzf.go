@@ -25,8 +25,16 @@ type FzfResult struct {
 	Query string
 }
 
+func fzfCommand() (string, []string) {
+	if os.Getenv("TMUX") != "" {
+		return "fzf-tmux", []string{"-p", "100%,100%", "--"}
+	}
+	return "fzf", nil
+}
+
 func fzfSelect(items []string, opts FzfOptions) (*FzfResult, error) {
-	args := []string{"--ansi"}
+	bin, prefixArgs := fzfCommand()
+	args := append(prefixArgs, "--ansi")
 
 	if opts.Preview != "" {
 		args = append(args, "--preview", opts.Preview)
@@ -50,7 +58,7 @@ func fzfSelect(items []string, opts FzfOptions) (*FzfResult, error) {
 		args = append(args, "--bind", b)
 	}
 
-	cmd := exec.Command("fzf", args...)
+	cmd := exec.Command(bin, args...)
 	cmd.Stdin = strings.NewReader(strings.Join(items, "\n"))
 	cmd.Stderr = os.Stderr
 	cmd.Env = append(os.Environ(), "CLICOLOR_FORCE=1")
