@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,10 @@ func shellOutput(cmd string, env []string) (string, error) {
 	c.Env = append(os.Environ(), env...)
 	out, err := c.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return "", fmt.Errorf("command exited with %d: %s\n%s", exitErr.ExitCode(), cmd, strings.TrimSpace(string(exitErr.Stderr)))
+		}
 		return "", err
 	}
 	return strings.TrimRight(string(out), "\n"), nil
@@ -35,8 +40,28 @@ func shellExec(cmd string, env []string) error {
 	if err != nil {
 		return err
 	}
+
+	script := cmd
+	if os.Getenv("TMUX") != "" {
+		escaped := strings.ReplaceAll(cmd, "'", "'\\''")
+		const tmuxWrapper = `
+# Save original stdout to fd 3, capture stderr into $__stderr
+exec 3>&1
+__stderr=$( (%s) 2>&1 1>&3 )
+__rc=$?
+exec 3>&-
+# On failure, show error in a tmux popup
+if [ $__rc -ne 0 ]; then
+  tmux display-popup -e "TUICAST_ERR=error (exit $__rc): %s
+$__stderr" -E 'echo "$TUICAST_ERR"; echo; echo "Press Enter to close..."; read _'
+fi
+exit $__rc
+`
+		script = fmt.Sprintf(tmuxWrapper, cmd, escaped)
+	}
+
 	environ := append(os.Environ(), env...)
-	return syscall.Exec(shPath, []string{"sh", "-c", cmd}, environ)
+	return syscall.Exec(shPath, []string{"sh", "-c", script}, environ)
 }
 
 func historyPath() string {
