@@ -14,6 +14,17 @@ func transform(cmd string, lines []string, env []string) ([]string, error) {
 	return transformPerItem(cmd, lines, env)
 }
 
+func transformSingle(cmd string, line string, env []string) (string, error) {
+	expanded := strings.ReplaceAll(cmd, "{}", line)
+	c := exec.Command("sh", "-c", expanded)
+	c.Env = append(os.Environ(), env...)
+	out, err := c.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(out), "\n"), nil
+}
+
 func transformPerItem(cmd string, lines []string, env []string) ([]string, error) {
 	result := make([]string, 0, len(lines))
 	for _, line := range lines {

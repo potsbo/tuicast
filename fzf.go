@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -27,7 +28,7 @@ type FzfResult struct {
 
 func fzfCommand() (string, []string) {
 	if os.Getenv("TMUX") != "" {
-		return "fzf-tmux", []string{"-p", "100%,100%", "--"}
+		return "fzf", []string{"--tmux", "100%,100%"}
 	}
 	return "fzf", nil
 }
@@ -89,6 +90,59 @@ func fzfSelect(items []string, opts FzfOptions) (*FzfResult, error) {
 		}
 	}
 	return &FzfResult{Index: -1, Line: selected}, nil
+}
+
+func fzfSelectStream(input io.Reader, opts FzfOptions) (*FzfResult, error) {
+	bin, prefixArgs := fzfCommand()
+	args := append(prefixArgs, "--ansi")
+
+	if opts.Preview != "" {
+		args = append(args, "--preview", opts.Preview)
+	}
+	if opts.Delimiter != "" {
+		args = append(args, "--delimiter", opts.Delimiter)
+	}
+	if opts.WithNth != "" {
+		args = append(args, "--with-nth", opts.WithNth)
+	}
+	if opts.Header != "" {
+		args = append(args, "--header", opts.Header)
+	}
+	if opts.Prompt != "" {
+		args = append(args, "--prompt", opts.Prompt)
+	}
+	if opts.PrintQuery {
+		args = append(args, "--print-query")
+	}
+	for _, b := range opts.Bind {
+		args = append(args, "--bind", b)
+	}
+
+	cmd := exec.Command(bin, args...)
+	cmd.Stdin = input
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), "CLICOLOR_FORCE=1")
+
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if exitErr.ExitCode() == 130 || exitErr.ExitCode() == 1 {
+				return nil, ErrCancelled
+			}
+		}
+		return nil, err
+	}
+
+	output := strings.TrimRight(string(out), "\n")
+
+	if opts.PrintQuery {
+		parts := strings.SplitN(output, "\n", 2)
+		query := parts[0]
+		return &FzfResult{Query: query}, nil
+	}
+
+	return &FzfResult{Index: -1, Line: output}, nil
 }
 
 func fzfTextInput(placeholder string) (string, error) {

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,17 +118,14 @@ func executeFormView(cfg *Config, name string, v *View) error {
 }
 
 func executeSelectStep(step *FormStep, env []string) (string, error) {
-	lines, err := shellLines(step.List, env)
+	listCmd := exec.Command("sh", "-c", step.List)
+	listCmd.Env = append(os.Environ(), env...)
+	stdout, err := listCmd.StdoutPipe()
 	if err != nil {
 		return "", fmt.Errorf("list command failed: %w", err)
 	}
-
-	displayLines := lines
-	if step.Display != "" {
-		displayLines, err = transform(step.Display, lines, env)
-		if err != nil {
-			return "", fmt.Errorf("display transform failed: %w", err)
-		}
+	if err := listCmd.Start(); err != nil {
+		return "", fmt.Errorf("list command failed: %w", err)
 	}
 
 	opts := FzfOptions{}
@@ -136,35 +135,144 @@ func executeSelectStep(step *FormStep, env []string) (string, error) {
 		}
 	}
 
-	result, err := fzfSelect(displayLines, opts)
+	var fzfInput io.Reader
+	if step.Display == "" {
+		fzfInput = stdout
+	} else if strings.HasPrefix(step.Display, "|") {
+		fzfInput, err = streamTransformPipe(stdout, step.Display[1:], env)
+		if err != nil {
+			listCmd.Wait()
+			return "", fmt.Errorf("display transform failed: %w", err)
+		}
+		opts.Delimiter = "\t"
+		opts.WithNth = "2"
+	} else {
+		fzfInput = streamTransformPerItem(stdout, step.Display, env)
+		opts.Delimiter = "\t"
+		opts.WithNth = "2"
+	}
+
+	if opts.Preview != "" && opts.Delimiter == "\t" {
+		opts.Preview = strings.ReplaceAll(opts.Preview, "{}", "{1}")
+	}
+
+	result, err := fzfSelectStream(fzfInput, opts)
+	listCmd.Wait()
 	if err != nil {
 		return "", err
 	}
 
-	if result.Index >= 0 && result.Index < len(lines) {
-		return lines[result.Index], nil
+	selected := result.Line
+	if opts.Delimiter == "\t" {
+		selected = strings.SplitN(selected, "\t", 2)[0]
 	}
-	return result.Line, nil
+	return selected, nil
 }
 
-type unionItem struct {
-	fzfLine  string // view_name\traw\tdisplay for fzf
-	viewName string
-	rawLine  string
-	isLeaf   bool // true = executeView directly (menu item), false = FormView with env
+func streamTransformPerItem(input io.Reader, cmd string, env []string) io.Reader {
+	// Convert per-item transform into a single shell process.
+	// e.g. "basename {}" → while IFS= read -r __l; do basename "$__l"; done
+	pipeCmd := strings.ReplaceAll(cmd, "{}", "\"$__tuicast_line\"")
+	script := fmt.Sprintf(`while IFS= read -r __tuicast_line; do %s; done`, pipeCmd)
+
+	c := exec.Command("sh", "-c", script)
+	c.Env = append(os.Environ(), env...)
+
+	pipeIn, _ := c.StdinPipe()
+	pipeOut, _ := c.StdoutPipe()
+	c.Start()
+
+	origCh := make(chan string, 64)
+	pr, pw := io.Pipe()
+
+	// Feed input lines to the transform shell.
+	go func() {
+		scanner := bufio.NewScanner(input)
+		for scanner.Scan() {
+			line := scanner.Text()
+			origCh <- line
+			fmt.Fprintln(pipeIn, line)
+		}
+		close(origCh)
+		pipeIn.Close()
+	}()
+
+	// Zip originals with transform output, streaming each pair to fzf.
+	go func() {
+		dispScanner := bufio.NewScanner(pipeOut)
+		for original := range origCh {
+			if dispScanner.Scan() {
+				fmt.Fprintf(pw, "%s\t%s\n", original, dispScanner.Text())
+			}
+		}
+		c.Wait()
+		pw.Close()
+	}()
+
+	return pr
 }
 
-func collectUnionItems(cfg *Config, refs []string) ([]unionItem, error) {
-	var items []unionItem
+func streamTransformPipe(input io.Reader, cmd string, env []string) (io.Reader, error) {
+	pipeCmd := strings.TrimSpace(cmd)
+	c := exec.Command("sh", "-c", pipeCmd)
+	c.Env = append(os.Environ(), env...)
+
+	pipeIn, err := c.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	pipeOut, err := c.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := c.Start(); err != nil {
+		return nil, err
+	}
+
+	pr, pw := io.Pipe()
+
+	// Read pipe command output concurrently to avoid OS pipe buffer deadlock.
+	displayCh := make(chan []string, 1)
+	go func() {
+		var displays []string
+		scanner := bufio.NewScanner(pipeOut)
+		for scanner.Scan() {
+			displays = append(displays, scanner.Text())
+		}
+		displayCh <- displays
+	}()
+
+	// Feed input to pipe command while collecting originals, then zip results.
+	go func() {
+		var originals []string
+		scanner := bufio.NewScanner(input)
+		for scanner.Scan() {
+			line := scanner.Text()
+			originals = append(originals, line)
+			fmt.Fprintln(pipeIn, line)
+		}
+		pipeIn.Close()
+
+		displays := <-displayCh
+		c.Wait()
+
+		for i, original := range originals {
+			if i < len(displays) {
+				fmt.Fprintf(pw, "%s\t%s\n", original, displays[i])
+			}
+		}
+		pw.Close()
+	}()
+
+	return pr, nil
+}
+
+func writeUnionItems(cfg *Config, refs []string, w io.Writer) {
 	for _, ref := range refs {
 		target := cfg.Views[ref]
 		switch {
 		case target.isUnionView():
-			inner, err := collectUnionItems(cfg, target.Union)
-			if err != nil {
-				return nil, err
-			}
-			items = append(items, inner...)
+			writeUnionItems(cfg, target.Union, w)
 		case target.isMenuView():
 			for _, menuRef := range target.Menu {
 				menuView := cfg.Views[menuRef]
@@ -172,45 +280,93 @@ func collectUnionItems(cfg *Config, refs []string) ([]unionItem, error) {
 				if title == "" {
 					title = menuRef
 				}
-				items = append(items, unionItem{
-					fzfLine:  menuRef + "\t" + menuRef + "\t" + title,
-					viewName: menuRef,
-					isLeaf:   true,
-				})
+				fmt.Fprintf(w, "%s\t%s\t%s\n", menuRef, menuRef, title)
 			}
 		case target.isFormView() && len(target.Form) != 1:
 			title := target.Title
 			if title == "" {
 				title = ref
 			}
-			items = append(items, unionItem{
-				fzfLine:  ref + "\t" + ref + "\t" + title,
-				viewName: ref,
-				isLeaf:   true,
-			})
+			fmt.Fprintf(w, "%s\t%s\t%s\n", ref, ref, title)
 		default:
-			step := target.Form[0]
-			lines, err := shellLines(step.List, nil)
-			if err != nil {
-				return nil, fmt.Errorf("view %q: list command failed: %w", ref, err)
-			}
-			displayLines := lines
-			if step.Display != "" {
-				displayLines, err = transform(step.Display, lines, nil)
-				if err != nil {
-					return nil, fmt.Errorf("view %q: display transform failed: %w", ref, err)
-				}
-			}
-			for i, line := range lines {
-				items = append(items, unionItem{
-					fzfLine:  ref + "\t" + line + "\t" + displayLines[i],
-					viewName: ref,
-					rawLine:  line,
-				})
-			}
+			writeUnionFormItems(ref, &target, w)
 		}
 	}
-	return items, nil
+}
+
+func writeUnionFormItems(ref string, target *View, w io.Writer) {
+	step := target.Form[0]
+	listCmd := exec.Command("sh", "-c", step.List)
+	stdout, err := listCmd.StdoutPipe()
+	if err != nil {
+		return
+	}
+	if err := listCmd.Start(); err != nil {
+		return
+	}
+	defer listCmd.Wait()
+
+	if step.Display == "" {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			fmt.Fprintf(w, "%s\t%s\t%s\n", ref, line, line)
+		}
+	} else if strings.HasPrefix(step.Display, "|") {
+		var lines []string
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			lines = append(lines, scanner.Text())
+		}
+		if len(lines) == 0 {
+			return
+		}
+		displays, err := transformPipe(step.Display[1:], lines, nil)
+		if err != nil {
+			return
+		}
+		for i, line := range lines {
+			if i < len(displays) {
+				fmt.Fprintf(w, "%s\t%s\t%s\n", ref, line, displays[i])
+			}
+		}
+	} else {
+		pipeCmd := strings.ReplaceAll(step.Display, "{}", "\"$__tuicast_line\"")
+		script := fmt.Sprintf(`while IFS= read -r __tuicast_line; do %s; done`, pipeCmd)
+
+		c := exec.Command("sh", "-c", script)
+		pipeIn, err := c.StdinPipe()
+		if err != nil {
+			return
+		}
+		pipeOut, err := c.StdoutPipe()
+		if err != nil {
+			return
+		}
+		if err := c.Start(); err != nil {
+			return
+		}
+
+		origCh := make(chan string, 64)
+		go func() {
+			scanner := bufio.NewScanner(stdout)
+			for scanner.Scan() {
+				line := scanner.Text()
+				origCh <- line
+				fmt.Fprintln(pipeIn, line)
+			}
+			close(origCh)
+			pipeIn.Close()
+		}()
+
+		dispScanner := bufio.NewScanner(pipeOut)
+		for original := range origCh {
+			if dispScanner.Scan() {
+				fmt.Fprintf(w, "%s\t%s\t%s\n", ref, original, dispScanner.Text())
+			}
+		}
+		c.Wait()
+	}
 }
 
 func collectUnionFormRefs(cfg *Config, refs []string) []string {
@@ -228,15 +384,11 @@ func collectUnionFormRefs(cfg *Config, refs []string) []string {
 }
 
 func executeUnionView(cfg *Config, name string, v *View) error {
-	items, err := collectUnionItems(cfg, v.Union)
-	if err != nil {
-		return err
-	}
-
-	fzfLines := make([]string, len(items))
-	for i, item := range items {
-		fzfLines[i] = item.fzfLine
-	}
+	pr, pw := io.Pipe()
+	go func() {
+		writeUnionItems(cfg, v.Union, pw)
+		pw.Close()
+	}()
 
 	formRefs := collectUnionFormRefs(cfg, v.Union)
 	previewScript := generatePreviewDispatcher(cfg, formRefs)
@@ -249,31 +401,34 @@ func executeUnionView(cfg *Config, name string, v *View) error {
 		opts.Preview = previewScript
 	}
 
-	result, err := fzfSelect(fzfLines, opts)
+	result, err := fzfSelectStream(pr, opts)
+	pr.Close()
 	if err != nil {
 		return err
 	}
 
-	if result.Index < 0 || result.Index >= len(items) {
+	parts := strings.SplitN(result.Line, "\t", 3)
+	if len(parts) < 2 {
 		return fmt.Errorf("invalid selection")
 	}
-	selected := items[result.Index]
+	selectedView := parts[0]
+	selectedRaw := parts[1]
 
-	if selected.isLeaf {
-		return executeView(cfg, selected.viewName)
+	refView := cfg.Views[selectedView]
+	if refView.isFormView() && len(refView.Form) == 1 {
+		stepName := refView.Form[0].Name
+		env := []string{stepName + "=" + selectedRaw}
+
+		expanded, err := shellOutput("echo "+refView.Run, env)
+		if err != nil {
+			expanded = refView.Run
+		}
+		_ = appendHistory(historyPath(), expanded)
+
+		return shellExec(refView.Run, env)
 	}
 
-	refView := cfg.Views[selected.viewName]
-	stepName := refView.Form[0].Name
-	env := []string{stepName + "=" + selected.rawLine}
-
-	expanded, err := shellOutput("echo "+refView.Run, env)
-	if err != nil {
-		expanded = refView.Run
-	}
-	_ = appendHistory(historyPath(), expanded)
-
-	return shellExec(refView.Run, env)
+	return executeView(cfg, selectedView)
 }
 
 func generatePreviewDispatcher(cfg *Config, refs []string) string {

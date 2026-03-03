@@ -10,19 +10,18 @@ func TestFzfCommand_InTmux(t *testing.T) {
 	defer os.Unsetenv("TMUX")
 
 	bin, args := fzfCommand()
-	if bin != "fzf-tmux" {
-		t.Errorf("expected fzf-tmux, got %q", bin)
+	if bin != "fzf" {
+		t.Errorf("expected fzf, got %q", bin)
 	}
-	// should have popup args before --
 	found := false
 	for _, a := range args {
-		if a == "--" {
+		if a == "--tmux" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("expected -- separator in fzf-tmux args")
+		t.Error("expected --tmux flag in args")
 	}
 }
 
