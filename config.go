@@ -19,12 +19,41 @@ type View struct {
 	Menu  []string   `yaml:"menu"`
 }
 
+type Source struct {
+	List    string `yaml:"list"`
+	Display string `yaml:"display"`
+	Preview string `yaml:"preview"`
+	Input   string `yaml:"input"`
+	Label   string `yaml:"label"`
+}
+
 type FormStep struct {
-	Name        string `yaml:"name"`
-	List        string `yaml:"list"`
-	Display     string `yaml:"display"`
-	Preview     string `yaml:"preview"`
-	Placeholder string `yaml:"placeholder"`
+	Name    string   `yaml:"name"`
+	Sources []Source `yaml:"sources"`
+}
+
+func (s *FormStep) listSources() []Source {
+	var result []Source
+	for _, src := range s.Sources {
+		if src.List != "" {
+			result = append(result, src)
+		}
+	}
+	return result
+}
+
+func (s *FormStep) inputSources() []Source {
+	var result []Source
+	for _, src := range s.Sources {
+		if src.Input != "" {
+			result = append(result, src)
+		}
+	}
+	return result
+}
+
+func (s *FormStep) isInputOnly() bool {
+	return len(s.listSources()) == 0 && len(s.inputSources()) > 0
 }
 
 func ParseConfig(data []byte) (*Config, error) {
@@ -122,20 +151,49 @@ func (s *FormStep) validate(viewName string, index int) error {
 	if s.Name == "" {
 		return fmt.Errorf("view %q: form step %d: name is required", viewName, index)
 	}
-	hasList := s.List != ""
-	hasPlaceholder := s.Placeholder != ""
-	if !hasList && !hasPlaceholder {
-		return fmt.Errorf("view %q: form step %q: must have list or placeholder", viewName, s.Name)
+	if len(s.Sources) == 0 {
+		return fmt.Errorf("view %q: form step %q: sources is required", viewName, s.Name)
 	}
-	if hasList && hasPlaceholder {
-		return fmt.Errorf("view %q: form step %q: cannot have both list and placeholder", viewName, s.Name)
+	for i, src := range s.Sources {
+		if err := src.validate(viewName, s.Name, i); err != nil {
+			return err
+		}
 	}
-	if err := validateTransformCommand(s.Display, viewName, s.Name, "display"); err != nil {
-		return err
+	return nil
+}
+
+func (src *Source) validate(viewName, stepName string, index int) error {
+	hasList := src.List != ""
+	hasInput := src.Input != ""
+
+	if !hasList && !hasInput {
+		return fmt.Errorf("view %q: form step %q: source %d: must have list or input", viewName, stepName, index)
 	}
-	if err := validateTransformCommand(s.Preview, viewName, s.Name, "preview"); err != nil {
-		return err
+	if hasList && hasInput {
+		return fmt.Errorf("view %q: form step %q: source %d: cannot have both list and input", viewName, stepName, index)
 	}
+
+	if hasList {
+		if src.Label != "" {
+			return fmt.Errorf("view %q: form step %q: source %d: list source cannot have label", viewName, stepName, index)
+		}
+		if err := validateTransformCommand(src.Display, viewName, stepName, "display"); err != nil {
+			return err
+		}
+		if err := validateTransformCommand(src.Preview, viewName, stepName, "preview"); err != nil {
+			return err
+		}
+	}
+
+	if hasInput {
+		if src.Display != "" {
+			return fmt.Errorf("view %q: form step %q: source %d: input source cannot have display", viewName, stepName, index)
+		}
+		if src.Preview != "" {
+			return fmt.Errorf("view %q: form step %q: source %d: input source cannot have preview", viewName, stepName, index)
+		}
+	}
+
 	return nil
 }
 

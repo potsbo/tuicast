@@ -93,14 +93,15 @@ func executeFormView(cfg *Config, name string, v *View) error {
 	env := []string{}
 
 	for _, step := range v.Form {
-		if step.List != "" {
-			value, err := executeSelectStep(&step, env)
+		if step.isInputOnly() {
+			inputSources := step.inputSources()
+			value, err := fzfTextInput(inputSources[0].Input)
 			if err != nil {
 				return err
 			}
 			env = append(env, step.Name+"="+value)
 		} else {
-			value, err := fzfTextInput(step.Placeholder)
+			value, err := executeSelectStep(&step, env)
 			if err != nil {
 				return err
 			}
@@ -118,7 +119,20 @@ func executeFormView(cfg *Config, name string, v *View) error {
 }
 
 func executeSelectStep(step *FormStep, env []string) (string, error) {
-	listCmd := exec.Command("sh", "-c", step.List)
+	listSources := step.listSources()
+	inputSources := step.inputSources()
+
+	// Single list source with no input sources: simple path (same as before)
+	if len(listSources) == 1 && len(inputSources) == 0 {
+		return executeSingleListSource(listSources[0], env)
+	}
+
+	// Multiple list sources or list+input: multi-source path
+	return executeMultiSourceStep(listSources, inputSources, env)
+}
+
+func executeSingleListSource(src Source, env []string) (string, error) {
+	listCmd := exec.Command("sh", "-c", src.List)
 	listCmd.Env = append(os.Environ(), env...)
 	stdout, err := listCmd.StdoutPipe()
 	if err != nil {
@@ -129,17 +143,17 @@ func executeSelectStep(step *FormStep, env []string) (string, error) {
 	}
 
 	opts := FzfOptions{}
-	if step.Preview != "" {
-		if strings.Contains(step.Preview, "{}") {
-			opts.Preview = step.Preview
+	if src.Preview != "" {
+		if strings.Contains(src.Preview, "{}") {
+			opts.Preview = src.Preview
 		}
 	}
 
 	var fzfInput io.Reader
-	if step.Display == "" {
+	if src.Display == "" {
 		fzfInput = stdout
-	} else if strings.HasPrefix(step.Display, "|") {
-		fzfInput, err = streamTransformPipe(stdout, step.Display[1:], env)
+	} else if strings.HasPrefix(src.Display, "|") {
+		fzfInput, err = streamTransformPipe(stdout, src.Display[1:], env)
 		if err != nil {
 			listCmd.Wait()
 			return "", fmt.Errorf("display transform failed: %w", err)
@@ -147,7 +161,7 @@ func executeSelectStep(step *FormStep, env []string) (string, error) {
 		opts.Delimiter = "\t"
 		opts.WithNth = "2"
 	} else {
-		fzfInput = streamTransformPerItem(stdout, step.Display, env)
+		fzfInput = streamTransformPerItem(stdout, src.Display, env)
 		opts.Delimiter = "\t"
 		opts.WithNth = "2"
 	}
@@ -167,6 +181,120 @@ func executeSelectStep(step *FormStep, env []string) (string, error) {
 		selected = strings.SplitN(selected, "\t", 2)[0]
 	}
 	return selected, nil
+}
+
+func executeMultiSourceStep(listSources, inputSources []Source, env []string) (string, error) {
+	// Collect all items as: srcIdx\trawValue\tdisplayValue
+	pr, pw := io.Pipe()
+
+	go func() {
+		for srcIdx, src := range listSources {
+			lines, err := shellLines(src.List, env)
+			if err != nil || len(lines) == 0 {
+				continue
+			}
+
+			if src.Display == "" {
+				for _, line := range lines {
+					fmt.Fprintf(pw, "%d\t%s\t%s\n", srcIdx, line, line)
+				}
+			} else if strings.HasPrefix(src.Display, "|") {
+				displays, err := transformPipe(src.Display[1:], lines, env)
+				if err != nil {
+					for _, line := range lines {
+						fmt.Fprintf(pw, "%d\t%s\t%s\n", srcIdx, line, line)
+					}
+				} else {
+					for i, line := range lines {
+						display := line
+						if i < len(displays) {
+							display = displays[i]
+						}
+						fmt.Fprintf(pw, "%d\t%s\t%s\n", srcIdx, line, display)
+					}
+				}
+			} else {
+				displays, err := transformPerItem(src.Display, lines, env)
+				if err != nil {
+					for _, line := range lines {
+						fmt.Fprintf(pw, "%d\t%s\t%s\n", srcIdx, line, line)
+					}
+				} else {
+					for i, line := range lines {
+						display := line
+						if i < len(displays) {
+							display = displays[i]
+						}
+						fmt.Fprintf(pw, "%d\t%s\t%s\n", srcIdx, line, display)
+					}
+				}
+			}
+		}
+
+		// Add input source labels
+		for inputIdx, src := range inputSources {
+			label := src.Label
+			if label == "" {
+				label = src.Input
+			}
+			fmt.Fprintf(pw, "input:%d\t__INPUT__\t%s\n", inputIdx, label)
+		}
+
+		pw.Close()
+	}()
+
+	// Build preview dispatcher for multi-source
+	var previewScript string
+	hasPreview := false
+	var cases []string
+	for srcIdx, src := range listSources {
+		if src.Preview != "" {
+			hasPreview = true
+			previewCmd := src.Preview
+			if strings.Contains(previewCmd, "{}") {
+				previewCmd = strings.ReplaceAll(previewCmd, "{}", "{2}")
+			}
+			cases = append(cases, fmt.Sprintf("  %d) %s ;;", srcIdx, previewCmd))
+		}
+	}
+	if hasPreview {
+		previewScript = "case {1} in\n" + strings.Join(cases, "\n") + "\nesac"
+	}
+
+	opts := FzfOptions{
+		Delimiter: "\t",
+		WithNth:   "3",
+	}
+	if previewScript != "" {
+		opts.Preview = previewScript
+	}
+
+	result, err := fzfSelectStream(pr, opts)
+	pr.Close()
+	if err != nil {
+		return "", err
+	}
+
+	parts := strings.SplitN(result.Line, "\t", 3)
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid selection")
+	}
+
+	srcTag := parts[0]
+	rawValue := parts[1]
+
+	// If selected item is from an input source, prompt for text input
+	if strings.HasPrefix(srcTag, "input:") {
+		idxStr := strings.TrimPrefix(srcTag, "input:")
+		idx := 0
+		fmt.Sscanf(idxStr, "%d", &idx)
+		if idx < len(inputSources) {
+			return fzfTextInput(inputSources[idx].Input)
+		}
+		return "", fmt.Errorf("invalid input source index")
+	}
+
+	return rawValue, nil
 }
 
 func streamTransformPerItem(input io.Reader, cmd string, env []string) io.Reader {
@@ -304,7 +432,28 @@ func writeUnionItems(cfg *Config, refs []string, w io.Writer, seen map[string]bo
 
 func writeUnionFormItems(ref string, target *View, w io.Writer, seen map[string]bool) {
 	step := target.Form[0]
-	listCmd := exec.Command("sh", "-c", step.List)
+	listSources := step.listSources()
+
+	for _, src := range listSources {
+		writeUnionFormItemsForSource(ref, src, w, seen)
+	}
+
+	// Add input source labels as union items
+	for _, src := range step.inputSources() {
+		label := src.Label
+		if label == "" {
+			label = src.Input
+		}
+		key := ref + "\t__INPUT__\t" + label
+		if !seen[key] {
+			seen[key] = true
+			fmt.Fprintf(w, "%s\t__INPUT__\t%s\n", ref, label)
+		}
+	}
+}
+
+func writeUnionFormItemsForSource(ref string, src Source, w io.Writer, seen map[string]bool) {
+	listCmd := exec.Command("sh", "-c", src.List)
 	stdout, err := listCmd.StdoutPipe()
 	if err != nil {
 		return
@@ -314,7 +463,7 @@ func writeUnionFormItems(ref string, target *View, w io.Writer, seen map[string]
 	}
 	defer listCmd.Wait()
 
-	if step.Display == "" {
+	if src.Display == "" {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -324,7 +473,7 @@ func writeUnionFormItems(ref string, target *View, w io.Writer, seen map[string]
 			seen[line] = true
 			fmt.Fprintf(w, "%s\t%s\t%s\n", ref, line, line)
 		}
-	} else if strings.HasPrefix(step.Display, "|") {
+	} else if strings.HasPrefix(src.Display, "|") {
 		var lines []string
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
@@ -333,7 +482,7 @@ func writeUnionFormItems(ref string, target *View, w io.Writer, seen map[string]
 		if len(lines) == 0 {
 			return
 		}
-		displays, err := transformPipe(step.Display[1:], lines, nil)
+		displays, err := transformPipe(src.Display[1:], lines, nil)
 		if err != nil {
 			return
 		}
@@ -344,7 +493,7 @@ func writeUnionFormItems(ref string, target *View, w io.Writer, seen map[string]
 			}
 		}
 	} else {
-		pipeCmd := strings.ReplaceAll(step.Display, "{}", "\"$__tuicast_line\"")
+		pipeCmd := strings.ReplaceAll(src.Display, "{}", "\"$__tuicast_line\"")
 		script := fmt.Sprintf(`while IFS= read -r __tuicast_line; do __out=$(%s); printf '%%s\n' "$__out"; done`, pipeCmd)
 
 		c := exec.Command("sh", "-c", script)
@@ -430,6 +579,30 @@ func executeUnionView(cfg *Config, name string, v *View) error {
 	selectedView := parts[0]
 	selectedRaw := parts[1]
 
+	// If the selected item is an input placeholder, prompt for text input
+	if selectedRaw == "__INPUT__" {
+		refView := cfg.Views[selectedView]
+		if len(refView.Form) == 1 {
+			inputSources := refView.Form[0].inputSources()
+			if len(inputSources) > 0 {
+				value, err := fzfTextInput(inputSources[0].Input)
+				if err != nil {
+					return err
+				}
+				stepName := refView.Form[0].Name
+				env := []string{stepName + "=" + value}
+
+				expanded, err := shellOutput("echo "+refView.Run, env)
+				if err != nil {
+					expanded = refView.Run
+				}
+				_ = appendHistory(historyPath(), expanded)
+
+				return shellExec(refView.Run, env)
+			}
+		}
+	}
+
 	refView := cfg.Views[selectedView]
 	if refView.isFormView() && len(refView.Form) == 1 {
 		stepName := refView.Form[0].Name
@@ -453,13 +626,17 @@ func generatePreviewDispatcher(cfg *Config, refs []string) string {
 	for _, ref := range refs {
 		refView := cfg.Views[ref]
 		step := refView.Form[0]
-		if step.Preview != "" {
-			hasPreview = true
-			previewCmd := step.Preview
-			if strings.Contains(previewCmd, "{}") {
-				previewCmd = strings.ReplaceAll(previewCmd, "{}", "{2}")
+		listSources := step.listSources()
+		for _, src := range listSources {
+			if src.Preview != "" {
+				hasPreview = true
+				previewCmd := src.Preview
+				if strings.Contains(previewCmd, "{}") {
+					previewCmd = strings.ReplaceAll(previewCmd, "{}", "{2}")
+				}
+				cases = append(cases, fmt.Sprintf("  %s) %s ;;", ref, previewCmd))
+				break // use first preview-bearing source per ref
 			}
-			cases = append(cases, fmt.Sprintf("  %s) %s ;;", ref, previewCmd))
 		}
 	}
 	if !hasPreview {

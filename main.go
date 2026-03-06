@@ -26,9 +26,10 @@ views:
     title: Files
     steps:
       - name: file
-        list: "find . -maxdepth 3 -type f -not -path './.git/*'"
-        display: "basename {}"
-        preview: "head -20 {}"
+        sources:
+          - list: "find . -maxdepth 3 -type f -not -path './.git/*'"
+            display: "basename {}"
+            preview: "head -20 {}"
     run: "echo Selected: $file"
 
   # FormView 1-step + pipe display
@@ -36,8 +37,9 @@ views:
     title: Shell scripts
     steps:
       - name: script
-        list: "find . -name '*.sh' -not -path './.git/*' 2>/dev/null; echo hello.sh"
-        display: "| sed 's|.*/||'"
+        sources:
+          - list: "find . -name '*.sh' -not -path './.git/*' 2>/dev/null; echo hello.sh"
+            display: "| sed 's|.*/||'"
     run: "echo Selected: $script"
 
   # FormView n-step (wizard)
@@ -45,10 +47,12 @@ views:
     title: Grep (wizard)
     steps:
       - name: pattern
-        placeholder: Search pattern
+        sources:
+          - input: Search pattern
       - name: file
-        list: "grep -rl \"$pattern\" . 2>/dev/null || true"
-        preview: "grep -n --color=always \"$pattern\" {}"
+        sources:
+          - list: "grep -rl \"$pattern\" . 2>/dev/null || true"
+            preview: "grep -n --color=always \"$pattern\" {}"
     run: "echo Found $pattern in $file"
 
   # FormView 1-step with pipe display
@@ -56,8 +60,9 @@ views:
     title: Colors
     steps:
       - name: color
-        list: "printf 'red\ngreen\nblue\nyellow\ncyan'"
-        display: "| awk '{print $0}'"
+        sources:
+          - list: "printf 'red\ngreen\nblue\nyellow\ncyan'"
+            display: "| awk '{print $0}'"
     run: "echo You picked $color"
 
   # FormView 0-step (leaf)

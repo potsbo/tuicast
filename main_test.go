@@ -38,18 +38,20 @@ func TestDefaultConfig_IsValidYAML(t *testing.T) {
 				hasFormViewNStep = true
 			}
 			for _, s := range v.Form {
-				if s.Placeholder != "" {
-					hasInputStep = true
-				}
-				if s.Display != "" {
-					if s.Display[0] == '|' {
-						hasPipeDisplay = true
-					} else {
-						hasPerItemDisplay = true
+				for _, src := range s.Sources {
+					if src.Input != "" {
+						hasInputStep = true
 					}
-				}
-				if s.Preview != "" {
-					hasPreview = true
+					if src.Display != "" {
+						if src.Display[0] == '|' {
+							hasPipeDisplay = true
+						} else {
+							hasPerItemDisplay = true
+						}
+					}
+					if src.Preview != "" {
+						hasPreview = true
+					}
 				}
 			}
 		}

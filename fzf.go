@@ -68,6 +68,11 @@ func fzfSelect(items []string, opts FzfOptions) (*FzfResult, error) {
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
+			if exitErr.ExitCode() == 1 && opts.PrintQuery {
+				output := strings.TrimRight(string(out), "\n")
+				parts := strings.SplitN(output, "\n", 2)
+				return &FzfResult{Query: parts[0]}, nil
+			}
 			if exitErr.ExitCode() == 130 || exitErr.ExitCode() == 1 {
 				return nil, ErrCancelled
 			}
@@ -127,6 +132,11 @@ func fzfSelectStream(input io.Reader, opts FzfOptions) (*FzfResult, error) {
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
+			if exitErr.ExitCode() == 1 && opts.PrintQuery {
+				output := strings.TrimRight(string(out), "\n")
+				parts := strings.SplitN(output, "\n", 2)
+				return &FzfResult{Query: parts[0]}, nil
+			}
 			if exitErr.ExitCode() == 130 || exitErr.ExitCode() == 1 {
 				return nil, ErrCancelled
 			}

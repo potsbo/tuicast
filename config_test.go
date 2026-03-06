@@ -11,7 +11,8 @@ views:
   main:
     steps:
       - name: file
-        list: find . -type f
+        sources:
+          - list: find . -type f
     run: vim $file
 `
 	cfg, err := ParseConfig([]byte(input))
@@ -34,8 +35,8 @@ views:
 	if v.Form[0].Name != "file" {
 		t.Errorf("expected step name 'file', got %q", v.Form[0].Name)
 	}
-	if v.Form[0].List != "find . -type f" {
-		t.Errorf("expected list 'find . -type f', got %q", v.Form[0].List)
+	if v.Form[0].Sources[0].List != "find . -type f" {
+		t.Errorf("expected list 'find . -type f', got %q", v.Form[0].Sources[0].List)
 	}
 }
 
@@ -45,21 +46,22 @@ views:
   main:
     steps:
       - name: file
-        list: find . -type f
-        display: basename {}
-        preview: head -50 {}
+        sources:
+          - list: find . -type f
+            display: basename {}
+            preview: head -50 {}
     run: vim $file
 `
 	cfg, err := ParseConfig([]byte(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	step := cfg.Views["main"].Form[0]
-	if step.Display != "basename {}" {
-		t.Errorf("expected display 'basename {}', got %q", step.Display)
+	src := cfg.Views["main"].Form[0].Sources[0]
+	if src.Display != "basename {}" {
+		t.Errorf("expected display 'basename {}', got %q", src.Display)
 	}
-	if step.Preview != "head -50 {}" {
-		t.Errorf("expected preview 'head -50 {}', got %q", step.Preview)
+	if src.Preview != "head -50 {}" {
+		t.Errorf("expected preview 'head -50 {}', got %q", src.Preview)
 	}
 }
 
@@ -69,16 +71,17 @@ views:
   main:
     steps:
       - name: query
-        placeholder: Enter search term
+        sources:
+          - input: Enter search term
     run: grep -r $query .
 `
 	cfg, err := ParseConfig([]byte(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	step := cfg.Views["main"].Form[0]
-	if step.Placeholder != "Enter search term" {
-		t.Errorf("expected placeholder 'Enter search term', got %q", step.Placeholder)
+	src := cfg.Views["main"].Form[0].Sources[0]
+	if src.Input != "Enter search term" {
+		t.Errorf("expected input 'Enter search term', got %q", src.Input)
 	}
 }
 
@@ -107,7 +110,7 @@ views:
 	}
 }
 
-func TestParseConfig_FormStepMustHaveListOrPlaceholder(t *testing.T) {
+func TestParseConfig_FormStepMustHaveSources(t *testing.T) {
 	input := `
 views:
   main:
@@ -117,23 +120,40 @@ views:
 `
 	_, err := ParseConfig([]byte(input))
 	if err == nil {
-		t.Fatal("expected error for step with neither list nor placeholder")
+		t.Fatal("expected error for step with no sources")
 	}
 }
 
-func TestParseConfig_FormStepCannotHaveBothListAndPlaceholder(t *testing.T) {
+func TestParseConfig_SourceMustHaveListOrInput(t *testing.T) {
 	input := `
 views:
   main:
     steps:
       - name: x
-        list: echo hello
-        placeholder: Type something
+        sources:
+          - display: basename {}
     run: echo $x
 `
 	_, err := ParseConfig([]byte(input))
 	if err == nil {
-		t.Fatal("expected error for step with both list and placeholder")
+		t.Fatal("expected error for source with neither list nor input")
+	}
+}
+
+func TestParseConfig_SourceCannotHaveBothListAndInput(t *testing.T) {
+	input := `
+views:
+  main:
+    steps:
+      - name: x
+        sources:
+          - list: echo hello
+            input: Type something
+    run: echo $x
+`
+	_, err := ParseConfig([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for source with both list and input")
 	}
 }
 
@@ -142,7 +162,8 @@ func TestParseConfig_FormStepMustHaveName(t *testing.T) {
 views:
   main:
     steps:
-      - list: echo hello
+      - sources:
+          - list: echo hello
     run: echo done
 `
 	_, err := ParseConfig([]byte(input))
@@ -166,8 +187,9 @@ views:
   main:
     steps:
       - name: file
-        list: find . -type f
-        display: "%s"
+        sources:
+          - list: find . -type f
+            display: "%s"
     run: vim $file
 `, tt.display)
 			_, err := ParseConfig([]byte(input))
@@ -184,8 +206,9 @@ views:
   main:
     steps:
       - name: file
-        list: find . -type f
-        display: basename
+        sources:
+          - list: find . -type f
+            display: basename
     run: vim $file
 `
 	_, err := ParseConfig([]byte(input))
@@ -202,12 +225,14 @@ views:
   files:
     steps:
       - name: file
-        list: find . -type f
+        sources:
+          - list: find . -type f
     run: vim $file
   branches:
     steps:
       - name: branch
-        list: git branch --format=%(refname:short)
+        sources:
+          - list: git branch --format=%(refname:short)
     run: git switch $branch
 `
 	cfg, err := ParseConfig([]byte(input))
@@ -263,17 +288,20 @@ views:
   tmux:
     steps:
       - name: s
-        list: echo tmux-session
+        sources:
+          - list: echo tmux-session
     run: tmux attach -t $s
   zellij:
     steps:
       - name: s
-        list: echo zellij-session
+        sources:
+          - list: echo zellij-session
     run: zellij attach $s
   files:
     steps:
       - name: file
-        list: find . -type f
+        sources:
+          - list: find . -type f
     run: vim $file
 `
 	_, err := ParseConfig([]byte(input))
@@ -290,15 +318,18 @@ views:
   files:
     steps:
       - name: file
-        list: echo file
+        sources:
+          - list: echo file
     run: echo $file
   wizard:
     title: Wizard
     steps:
       - name: a
-        list: echo a
+        sources:
+          - list: echo a
       - name: b
-        list: echo b
+        sources:
+          - list: echo b
     run: echo $a $b
 `
 	_, err := ParseConfig([]byte(input))
@@ -328,7 +359,8 @@ views:
     title: Files
     steps:
       - name: file
-        list: find . -type f
+        sources:
+          - list: find . -type f
     run: vim $file
   lazygit:
     title: Lazygit
@@ -344,5 +376,173 @@ views:
 	}
 	if v.Menu[0] != "files" || v.Menu[1] != "lazygit" {
 		t.Errorf("unexpected menu refs: %v", v.Menu)
+	}
+}
+
+// New tests for sources features
+
+func TestParseConfig_MultipleListSources(t *testing.T) {
+	input := `
+views:
+  main:
+    steps:
+      - name: branch
+        sources:
+          - list: git branch --local
+          - list: git branch --remote
+    run: git switch $branch
+`
+	cfg, err := ParseConfig([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	step := cfg.Views["main"].Form[0]
+	if len(step.Sources) != 2 {
+		t.Fatalf("expected 2 sources, got %d", len(step.Sources))
+	}
+	if step.Sources[0].List != "git branch --local" {
+		t.Errorf("expected first list 'git branch --local', got %q", step.Sources[0].List)
+	}
+	if step.Sources[1].List != "git branch --remote" {
+		t.Errorf("expected second list 'git branch --remote', got %q", step.Sources[1].List)
+	}
+}
+
+func TestParseConfig_ComboboxListAndLabeledInput(t *testing.T) {
+	input := `
+views:
+  main:
+    steps:
+      - name: branch
+        sources:
+          - list: git branch -a
+          - label: "✨ Create new branch"
+            input: Branch name
+    run: git switch $branch
+`
+	cfg, err := ParseConfig([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	step := cfg.Views["main"].Form[0]
+	if len(step.Sources) != 2 {
+		t.Fatalf("expected 2 sources, got %d", len(step.Sources))
+	}
+	if step.Sources[0].List != "git branch -a" {
+		t.Errorf("expected list 'git branch -a', got %q", step.Sources[0].List)
+	}
+	if step.Sources[1].Input != "Branch name" {
+		t.Errorf("expected input 'Branch name', got %q", step.Sources[1].Input)
+	}
+	if step.Sources[1].Label != "✨ Create new branch" {
+		t.Errorf("expected label '✨ Create new branch', got %q", step.Sources[1].Label)
+	}
+}
+
+func TestParseConfig_InputSourceCannotHaveDisplay(t *testing.T) {
+	input := `
+views:
+  main:
+    steps:
+      - name: x
+        sources:
+          - input: Enter value
+            display: basename {}
+    run: echo $x
+`
+	_, err := ParseConfig([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for input source with display")
+	}
+}
+
+func TestParseConfig_InputSourceCannotHavePreview(t *testing.T) {
+	input := `
+views:
+  main:
+    steps:
+      - name: x
+        sources:
+          - input: Enter value
+            preview: cat {}
+    run: echo $x
+`
+	_, err := ParseConfig([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for input source with preview")
+	}
+}
+
+func TestParseConfig_ListSourceCannotHaveLabel(t *testing.T) {
+	input := `
+views:
+  main:
+    steps:
+      - name: x
+        sources:
+          - list: echo hello
+            label: "my label"
+    run: echo $x
+`
+	_, err := ParseConfig([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for list source with label")
+	}
+}
+
+func TestParseConfig_EmptySourcesArray(t *testing.T) {
+	input := `
+views:
+  main:
+    steps:
+      - name: x
+        sources: []
+    run: echo $x
+`
+	_, err := ParseConfig([]byte(input))
+	if err == nil {
+		t.Fatal("expected error for empty sources array")
+	}
+}
+
+func TestParseConfig_IsInputOnly(t *testing.T) {
+	input := `
+views:
+  main:
+    steps:
+      - name: query
+        sources:
+          - input: Search pattern
+    run: grep -r $query .
+`
+	cfg, err := ParseConfig([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	step := cfg.Views["main"].Form[0]
+	if !step.isInputOnly() {
+		t.Error("expected isInputOnly() to be true for input-only step")
+	}
+}
+
+func TestParseConfig_IsNotInputOnly(t *testing.T) {
+	input := `
+views:
+  main:
+    steps:
+      - name: branch
+        sources:
+          - list: git branch -a
+          - label: "✨ Create new branch"
+            input: Branch name
+    run: git switch $branch
+`
+	cfg, err := ParseConfig([]byte(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	step := cfg.Views["main"].Form[0]
+	if step.isInputOnly() {
+		t.Error("expected isInputOnly() to be false for combobox step")
 	}
 }
