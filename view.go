@@ -434,8 +434,8 @@ func writeUnionFormItems(ref string, target *View, w io.Writer, seen map[string]
 	step := target.Form[0]
 	listSources := step.listSources()
 
-	for _, src := range listSources {
-		writeUnionFormItemsForSource(ref, src, w, seen)
+	for srcIdx, src := range listSources {
+		writeUnionFormItemsForSource(ref, srcIdx, src, w, seen)
 	}
 
 	// Add input source labels as union items
@@ -452,7 +452,7 @@ func writeUnionFormItems(ref string, target *View, w io.Writer, seen map[string]
 	}
 }
 
-func writeUnionFormItemsForSource(ref string, src Source, w io.Writer, seen map[string]bool) {
+func writeUnionFormItemsForSource(ref string, srcIdx int, src Source, w io.Writer, seen map[string]bool) {
 	listCmd := exec.Command("sh", "-c", src.List)
 	stdout, err := listCmd.StdoutPipe()
 	if err != nil {
@@ -471,7 +471,7 @@ func writeUnionFormItemsForSource(ref string, src Source, w io.Writer, seen map[
 				continue
 			}
 			seen[line] = true
-			fmt.Fprintf(w, "%s\t%s\t%s\n", ref, line, line)
+			fmt.Fprintf(w, "%s:%d\t%s\t%s\n", ref, srcIdx, line, line)
 		}
 	} else if strings.HasPrefix(src.Display, "|") {
 		var lines []string
@@ -489,7 +489,7 @@ func writeUnionFormItemsForSource(ref string, src Source, w io.Writer, seen map[
 		for i, line := range lines {
 			if i < len(displays) && !seen[line] {
 				seen[line] = true
-				fmt.Fprintf(w, "%s\t%s\t%s\n", ref, line, displays[i])
+				fmt.Fprintf(w, "%s:%d\t%s\t%s\n", ref, srcIdx, line, displays[i])
 			}
 		}
 	} else {
@@ -526,7 +526,7 @@ func writeUnionFormItemsForSource(ref string, src Source, w io.Writer, seen map[
 			if dispScanner.Scan() {
 				if !seen[original] {
 					seen[original] = true
-					fmt.Fprintf(w, "%s\t%s\t%s\n", ref, original, dispScanner.Text())
+					fmt.Fprintf(w, "%s:%d\t%s\t%s\n", ref, srcIdx, original, dispScanner.Text())
 				}
 			}
 		}
@@ -576,7 +576,7 @@ func executeUnionView(cfg *Config, name string, v *View) error {
 	if len(parts) < 2 {
 		return fmt.Errorf("invalid selection")
 	}
-	selectedView := parts[0]
+	selectedView := strings.SplitN(parts[0], ":", 2)[0]
 	selectedRaw := parts[1]
 
 	// If the selected item is an input placeholder, prompt for text input
@@ -627,15 +627,14 @@ func generatePreviewDispatcher(cfg *Config, refs []string) string {
 		refView := cfg.Views[ref]
 		step := refView.Form[0]
 		listSources := step.listSources()
-		for _, src := range listSources {
+		for srcIdx, src := range listSources {
 			if src.Preview != "" {
 				hasPreview = true
 				previewCmd := src.Preview
 				if strings.Contains(previewCmd, "{}") {
 					previewCmd = strings.ReplaceAll(previewCmd, "{}", "{2}")
 				}
-				cases = append(cases, fmt.Sprintf("  %s) %s ;;", ref, previewCmd))
-				break // use first preview-bearing source per ref
+				cases = append(cases, fmt.Sprintf("  %s:%d) %s ;;", ref, srcIdx, previewCmd))
 			}
 		}
 	}
