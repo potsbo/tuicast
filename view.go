@@ -173,7 +173,7 @@ func streamTransformPerItem(input io.Reader, cmd string, env []string) io.Reader
 	// Convert per-item transform into a single shell process.
 	// e.g. "basename {}" → while IFS= read -r __l; do basename "$__l"; done
 	pipeCmd := strings.ReplaceAll(cmd, "{}", "\"$__tuicast_line\"")
-	script := fmt.Sprintf(`while IFS= read -r __tuicast_line; do %s; done`, pipeCmd)
+	script := fmt.Sprintf(`while IFS= read -r __tuicast_line; do __out=$(%s); printf '%%s\n' "$__out"; done`, pipeCmd)
 
 	c := exec.Command("sh", "-c", script)
 	c.Env = append(os.Environ(), env...)
@@ -267,14 +267,18 @@ func streamTransformPipe(input io.Reader, cmd string, env []string) (io.Reader, 
 	return pr, nil
 }
 
-func writeUnionItems(cfg *Config, refs []string, w io.Writer) {
+func writeUnionItems(cfg *Config, refs []string, w io.Writer, seen map[string]bool) {
 	for _, ref := range refs {
 		target := cfg.Views[ref]
 		switch {
 		case target.isUnionView():
-			writeUnionItems(cfg, target.Union, w)
+			writeUnionItems(cfg, target.Union, w, seen)
 		case target.isMenuView():
 			for _, menuRef := range target.Menu {
+				if seen[menuRef] {
+					continue
+				}
+				seen[menuRef] = true
 				menuView := cfg.Views[menuRef]
 				title := menuView.Title
 				if title == "" {
@@ -283,18 +287,22 @@ func writeUnionItems(cfg *Config, refs []string, w io.Writer) {
 				fmt.Fprintf(w, "%s\t%s\t%s\n", menuRef, menuRef, title)
 			}
 		case target.isFormView() && len(target.Form) != 1:
+			if seen[ref] {
+				continue
+			}
+			seen[ref] = true
 			title := target.Title
 			if title == "" {
 				title = ref
 			}
 			fmt.Fprintf(w, "%s\t%s\t%s\n", ref, ref, title)
 		default:
-			writeUnionFormItems(ref, &target, w)
+			writeUnionFormItems(ref, &target, w, seen)
 		}
 	}
 }
 
-func writeUnionFormItems(ref string, target *View, w io.Writer) {
+func writeUnionFormItems(ref string, target *View, w io.Writer, seen map[string]bool) {
 	step := target.Form[0]
 	listCmd := exec.Command("sh", "-c", step.List)
 	stdout, err := listCmd.StdoutPipe()
@@ -310,6 +318,10 @@ func writeUnionFormItems(ref string, target *View, w io.Writer) {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
+			if seen[line] {
+				continue
+			}
+			seen[line] = true
 			fmt.Fprintf(w, "%s\t%s\t%s\n", ref, line, line)
 		}
 	} else if strings.HasPrefix(step.Display, "|") {
@@ -326,13 +338,14 @@ func writeUnionFormItems(ref string, target *View, w io.Writer) {
 			return
 		}
 		for i, line := range lines {
-			if i < len(displays) {
+			if i < len(displays) && !seen[line] {
+				seen[line] = true
 				fmt.Fprintf(w, "%s\t%s\t%s\n", ref, line, displays[i])
 			}
 		}
 	} else {
 		pipeCmd := strings.ReplaceAll(step.Display, "{}", "\"$__tuicast_line\"")
-		script := fmt.Sprintf(`while IFS= read -r __tuicast_line; do %s; done`, pipeCmd)
+		script := fmt.Sprintf(`while IFS= read -r __tuicast_line; do __out=$(%s); printf '%%s\n' "$__out"; done`, pipeCmd)
 
 		c := exec.Command("sh", "-c", script)
 		pipeIn, err := c.StdinPipe()
@@ -362,7 +375,10 @@ func writeUnionFormItems(ref string, target *View, w io.Writer) {
 		dispScanner := bufio.NewScanner(pipeOut)
 		for original := range origCh {
 			if dispScanner.Scan() {
-				fmt.Fprintf(w, "%s\t%s\t%s\n", ref, original, dispScanner.Text())
+				if !seen[original] {
+					seen[original] = true
+					fmt.Fprintf(w, "%s\t%s\t%s\n", ref, original, dispScanner.Text())
+				}
 			}
 		}
 		c.Wait()
@@ -386,7 +402,7 @@ func collectUnionFormRefs(cfg *Config, refs []string) []string {
 func executeUnionView(cfg *Config, name string, v *View) error {
 	pr, pw := io.Pipe()
 	go func() {
-		writeUnionItems(cfg, v.Union, pw)
+		writeUnionItems(cfg, v.Union, pw, make(map[string]bool))
 		pw.Close()
 	}()
 
