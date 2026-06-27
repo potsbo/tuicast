@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -188,48 +189,17 @@ func executeMultiSourceStep(listSources, inputSources []Source, env []string) (s
 	pr, pw := io.Pipe()
 
 	go func() {
+		// Run every list source concurrently so the fastest ones populate fzf
+		// immediately while slow sources (e.g. remote ssh) are still loading.
+		var wg sync.WaitGroup
 		for srcIdx, src := range listSources {
-			lines, err := shellLines(src.List, env)
-			if err != nil || len(lines) == 0 {
-				continue
-			}
-
-			if src.Display == "" {
-				for _, line := range lines {
-					fmt.Fprintf(pw, "%d\t%s\t%s\n", srcIdx, line, line)
-				}
-			} else if strings.HasPrefix(src.Display, "|") {
-				displays, err := transformPipe(src.Display[1:], lines, env)
-				if err != nil {
-					for _, line := range lines {
-						fmt.Fprintf(pw, "%d\t%s\t%s\n", srcIdx, line, line)
-					}
-				} else {
-					for i, line := range lines {
-						display := line
-						if i < len(displays) {
-							display = displays[i]
-						}
-						fmt.Fprintf(pw, "%d\t%s\t%s\n", srcIdx, line, display)
-					}
-				}
-			} else {
-				displays, err := transformPerItem(src.Display, lines, env)
-				if err != nil {
-					for _, line := range lines {
-						fmt.Fprintf(pw, "%d\t%s\t%s\n", srcIdx, line, line)
-					}
-				} else {
-					for i, line := range lines {
-						display := line
-						if i < len(displays) {
-							display = displays[i]
-						}
-						fmt.Fprintf(pw, "%d\t%s\t%s\n", srcIdx, line, display)
-					}
-				}
-			}
+			wg.Add(1)
+			go func(srcIdx int, src Source) {
+				defer wg.Done()
+				streamListSourceItems(srcIdx, src, pw, env)
+			}(srcIdx, src)
 		}
+		wg.Wait()
 
 		// Add input source labels
 		for inputIdx, src := range inputSources {
@@ -295,6 +265,100 @@ func executeMultiSourceStep(listSources, inputSources []Source, env []string) (s
 	}
 
 	return rawValue, nil
+}
+
+// streamListSourceItems runs a single list source and writes its items to w as
+// `srcIdx\trawValue\tdisplayValue` lines, streaming each line as soon as it is
+// available so fzf can render partial results. w must be safe for concurrent
+// writes (io.PipeWriter is); each line is emitted with a single Fprintf so
+// concurrent sources never interleave within a line.
+func streamListSourceItems(srcIdx int, src Source, w io.Writer, env []string) {
+	listCmd := exec.Command("sh", "-c", src.List)
+	listCmd.Env = append(os.Environ(), env...)
+	stdout, err := listCmd.StdoutPipe()
+	if err != nil {
+		return
+	}
+	if err := listCmd.Start(); err != nil {
+		return
+	}
+	defer listCmd.Wait()
+
+	switch {
+	case src.Display == "":
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			fmt.Fprintf(w, "%d\t%s\t%s\n", srcIdx, line, line)
+		}
+
+	case strings.HasPrefix(src.Display, "|"):
+		// Pipe-style display feeds every item through one command, so it is
+		// inherently batch: collect all lines, transform, then emit.
+		var lines []string
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			lines = append(lines, scanner.Text())
+		}
+		if len(lines) == 0 {
+			return
+		}
+		displays, err := transformPipe(src.Display[1:], lines, env)
+		for i, line := range lines {
+			display := line
+			if err == nil && i < len(displays) {
+				display = displays[i]
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s\n", srcIdx, line, display)
+		}
+
+	default:
+		// Per-item display: pipe raw lines through one long-lived transform
+		// shell and zip each result back, emitting as they complete.
+		streamPerItemDisplay(srcIdx, src.Display, stdout, w, env)
+	}
+}
+
+// streamPerItemDisplay pumps raw list lines through a per-item display command
+// (`{}` is replaced with the raw line) and writes `srcIdx\traw\tdisplay` lines
+// to w in input order, one at a time.
+func streamPerItemDisplay(srcIdx int, display string, stdout io.Reader, w io.Writer, env []string) {
+	pipeCmd := strings.ReplaceAll(display, "{}", "\"$__tuicast_line\"")
+	script := fmt.Sprintf(`while IFS= read -r __tuicast_line; do __out=$(%s); printf '%%s\n' "$__out"; done`, pipeCmd)
+
+	c := exec.Command("sh", "-c", script)
+	c.Env = append(os.Environ(), env...)
+	pipeIn, err := c.StdinPipe()
+	if err != nil {
+		return
+	}
+	pipeOut, err := c.StdoutPipe()
+	if err != nil {
+		return
+	}
+	if err := c.Start(); err != nil {
+		return
+	}
+	defer c.Wait()
+
+	origCh := make(chan string, 64)
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			origCh <- line
+			fmt.Fprintln(pipeIn, line)
+		}
+		close(origCh)
+		pipeIn.Close()
+	}()
+
+	dispScanner := bufio.NewScanner(pipeOut)
+	for original := range origCh {
+		if dispScanner.Scan() {
+			fmt.Fprintf(w, "%d\t%s\t%s\n", srcIdx, original, dispScanner.Text())
+		}
+	}
 }
 
 func streamTransformPerItem(input io.Reader, cmd string, env []string) io.Reader {
