@@ -38,16 +38,30 @@ func shellLines(cmd string, env []string) ([]string, error) {
 	return strings.Split(out, "\n"), nil
 }
 
-func shellExec(cmd string, env []string) error {
-	shPath, err := exec.LookPath("sh")
-	if err != nil {
-		return err
-	}
+// The surface hosting a run command (tmux popup, herdr popup, dedicated pane,
+// plain terminal) typically disappears the moment the process exits, so a bare
+// failing command flashes its error for a frame and is gone. runScript wraps
+// the command so the failure stays readable.
+//
+// Inside tmux there may be no usable tty at all (run-shell / keybinding
+// context), so the error is re-shown in a `tmux display-popup`. Everywhere
+// else the wrapper holds the terminal open until a key is pressed — but only
+// when a tty is available (headless runs exit straight through), and not for
+// SIGINT exits (130): ctrl-c'ing out of an interactive tool should just close.
+const holdWrapper = `
+(%s)
+__rc=$?
+if [ "$__rc" -ne 0 ] && [ "$__rc" -ne 130 ] && ( : </dev/tty ) 2>/dev/null; then
+  printf '\n\033[31m%%s\033[39m\npress any key to close\n' "error (exit $__rc)" >&2
+  __stty=$(stty -g </dev/tty 2>/dev/null) || __stty=''
+  [ -n "$__stty" ] && stty raw -echo </dev/tty 2>/dev/null
+  dd if=/dev/tty bs=1 count=1 >/dev/null 2>&1
+  [ -n "$__stty" ] && stty "$__stty" </dev/tty 2>/dev/null
+fi
+exit $__rc
+`
 
-	script := cmd
-	if os.Getenv("TMUX") != "" {
-		escaped := strings.ReplaceAll(cmd, "'", "'\\''")
-		const tmuxWrapper = `
+const tmuxWrapper = `
 # Save original stdout to fd 3, capture stderr into $__stderr
 exec 3>&1
 __stderr=$( (%s) 2>&1 1>&3 )
@@ -60,11 +74,22 @@ $__stderr" -E 'echo "$TUICAST_ERR"; echo; echo "Press Enter to close..."; read _
 fi
 exit $__rc
 `
-		script = fmt.Sprintf(tmuxWrapper, cmd, escaped)
-	}
 
+func runScript(cmd string) string {
+	if os.Getenv("TMUX") != "" {
+		escaped := strings.ReplaceAll(cmd, "'", "'\\''")
+		return fmt.Sprintf(tmuxWrapper, cmd, escaped)
+	}
+	return fmt.Sprintf(holdWrapper, cmd)
+}
+
+func shellExec(cmd string, env []string) error {
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		return err
+	}
 	environ := append(os.Environ(), env...)
-	return syscall.Exec(shPath, []string{"sh", "-c", script}, environ)
+	return syscall.Exec(shPath, []string{"sh", "-c", runScript(cmd)}, environ)
 }
 
 func historyPath() string {

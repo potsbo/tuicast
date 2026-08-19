@@ -401,7 +401,12 @@ history:
 
 - `list` コマンドが非ゼロで終了: エラーメッセージを表示して view を閉じる
 - pipe モードの `display` で出力行数が `list` と不一致: エラー
-- `run` コマンドが非ゼロで終了: エラーメッセージを表示 (tuicast 自体は正常終了)
+- `run` コマンドが非ゼロで終了: エラーを表示したまま任意のキー入力 (ctrl-c 含む) を待ってから終了する。
+  tuicast を popup (tmux / herdr 等) で動かしていると終了と同時に画面が消えるため、
+  失敗時だけ hold してエラーを読めるようにする。exit code はそのまま伝播する。
+  - ctrl-c による中断 (exit 130) は hold しない (対話ツールを ctrl-c で抜けただけのケース)
+  - tty が取れない環境では hold せず即終了する
+  - tmux 内では従来どおり `tmux display-popup` でエラーを再表示する (keybind 経由だと tty がないため)
 - fzf で Escape: 現在の view を閉じる (menu なら親に戻る、最上位なら tuicast 終了)
 - form の途中で Escape: その form を中断して前の画面に戻る
 
